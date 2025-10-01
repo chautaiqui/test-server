@@ -9,7 +9,7 @@ env:
   PROJECT: library
   IMAGE_NAME: test-server
   TAG: ${{ github.sha }}
-  REGISTRY: harbor.internal:52394   # đổi port này thành đúng NodePort Kong expose
+  REGISTRY: harbor.internal:30000   # đổi port này thành đúng NodePort Kong expose
 
 jobs:
   build-and-push:
