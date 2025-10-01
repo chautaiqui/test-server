@@ -30,8 +30,7 @@ jobs:
       # Xoá auth cũ có thể gây nhầm host/port
       - name: Cleanup old docker auth
         run: |
-          docker logout harbor.internal || true
-          docker logout harbor.internal:80 || true
+          docker logout ${{ env.REGISTRY }} || true
           docker logout ${{ env.REGISTRY }} || true
 
       # Login đúng host:port
