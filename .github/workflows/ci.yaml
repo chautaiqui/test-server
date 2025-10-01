@@ -6,10 +6,10 @@ on:
   workflow_dispatch: {}
 
 env:
-  REGISTRY_HOST: harbor.internal
-  PROJECT: library           # <- đúng project của robot
+  PROJECT: library
   IMAGE_NAME: test-server
   TAG: ${{ github.sha }}
+  REGISTRY: harbor.internal:${{ secrets.KONG_PORT }}   # GỘP host+port vào 1 biến
 
 jobs:
   build-and-push:
@@ -18,39 +18,40 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Debug kết nối & DNS/Host/Port ngay trên runner context
-      - name: Debug connectivity to Harbor via Kong
+      # Debug kết nối
+      - name: Debug connectivity
         run: |
-          echo "KONG_PORT=${{ secrets.KONG_PORT }}"
+          echo "REGISTRY=${{ env.REGISTRY }}"
           echo "== /etc/hosts =="
           grep -E 'harbor\.internal' /etc/hosts || true
-          echo "== check /v2/ =="
-          curl -sv -H "Host: harbor.internal" \
-            http://harbor.internal:${{ secrets.KONG_PORT }}/v2/ | head -n 20 || true
-          echo "== check /service/token =="
-          curl -sv -H "Host: harbor.internal" \
-            "http://harbor.internal:${{ secrets.KONG_PORT }}/service/token?service=harbor-registry&scope=repository:${{ env.PROJECT }}/${{ env.IMAGE_NAME }}:push" \
-            | head -n 20 || true
+          echo "== /v2/ =="
+          curl -sv -H "Host: harbor.internal" http://${{ env.REGISTRY }}/v2/ | head -n 20 || true
 
-      # Đăng nhập bằng action official (nhớ secrets đúng)
-      - name: Login to Harbor (robot of 'library')
+      # Xoá auth cũ có thể gây nhầm host/port
+      - name: Cleanup old docker auth
+        run: |
+          docker logout harbor.internal || true
+          docker logout harbor.internal:80 || true
+          docker logout ${{ env.REGISTRY }} || true
+
+      # Login đúng host:port
+      - name: Login to Harbor
         uses: docker/login-action@v3
         with:
-          registry: ${{ env.REGISTRY_HOST }}:${{ secrets.KONG_PORT }}
-          username: ${{ secrets.HARBOR_USERNAME }}   # ví dụ: robot$library+ci
+          registry: ${{ env.REGISTRY }}           # << dùng host:port
+          username: ${{ secrets.HARBOR_USERNAME }} # ví dụ: robot$library+ci
           password: ${{ secrets.HARBOR_PASSWORD }}
 
-      # In ra config để chắc chắn đã có auth (ẩn password)
-      - name: Show Docker auth config (masked)
+      - name: Show Docker auth (masked)
         run: |
           cat ~/.docker/config.json | sed 's/"auth": *"[^"]*"/"auth":"***"/g' || true
 
-      # Build & Push
+      # Build & push, TAGS phải gồm host:port
       - name: Build and push image
         uses: docker/build-push-action@v6
         with:
           context: .
           push: true
           tags: |
-            ${{ env.REGISTRY_HOST }}:${{ secrets.KONG_PORT }}/${{ env.PROJECT }}/${{ env.IMAGE_NAME }}:${{ env.TAG }}
-            ${{ env.REGISTRY_HOST }}:${{ secrets.KONG_PORT }}/${{ env.PROJECT }}/${{ env.IMAGE_NAME }}:latest
+            ${{ env.REGISTRY }}/${{ env.PROJECT }}/${{ env.IMAGE_NAME }}:${{ env.TAG }}
+            ${{ env.REGISTRY }}/${{ env.PROJECT }}/${{ env.IMAGE_NAME }}:latest
