@@ -7,7 +7,7 @@ on:
 
 env:
   REGISTRY_HOST: harbor.internal            # Harbor qua Kong (host nội bộ)
-  PROJECT: test-server                             # Harbor project
+  PROJECT: library                             # Harbor project
   IMAGE_NAME: test-server                      # Tên image trong project
   TAG: ${{ github.sha }}                    # Tag theo commit SHA
 
