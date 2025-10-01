@@ -2,56 +2,55 @@ name: CI (Self-hosted) — Build & Push to Harbor
 
 on:
   push:
-    branches: [ main ]   # đổi theo nhánh của bạn
+    branches: [ main ]
   workflow_dispatch: {}
 
 env:
-  REGISTRY_HOST: harbor.internal            # Harbor qua Kong (host nội bộ)
-  PROJECT: library                             # Harbor project
-  IMAGE_NAME: test-server                      # Tên image trong project
-  TAG: ${{ github.sha }}                    # Tag theo commit SHA
+  REGISTRY_HOST: harbor.internal
+  PROJECT: library           # <- đúng project của robot
+  IMAGE_NAME: test-server
+  TAG: ${{ github.sha }}
 
 jobs:
   build-and-push:
-    # Chạy trên self-hosted runner (máy local / pod trong k8s)
     runs-on: self-hosted
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      # (Tùy chọn) Hiển thị info runner để debug nhanh
-      - name: Runner info
+      # Debug kết nối & DNS/Host/Port ngay trên runner context
+      - name: Debug connectivity to Harbor via Kong
         run: |
-          uname -a || true
-          docker version || true
-          docker info || true
+          echo "KONG_PORT=${{ secrets.KONG_PORT }}"
+          echo "== /etc/hosts =="
+          grep -E 'harbor\.internal' /etc/hosts || true
+          echo "== check /v2/ =="
+          curl -sv -H "Host: harbor.internal" \
+            http://harbor.internal:${{ secrets.KONG_PORT }}/v2/ | head -n 20 || true
+          echo "== check /service/token =="
+          curl -sv -H "Host: harbor.internal" \
+            "http://harbor.internal:${{ secrets.KONG_PORT }}/service/token?service=harbor-registry&scope=repository:${{ env.PROJECT }}/${{ env.IMAGE_NAME }}:push" \
+            | head -n 20 || true
 
-      - name: Docker login Harbor (via Kong)
-        env:
-          REGISTRY: ${{ env.REGISTRY_HOST }}:${{ secrets.KONG_PORT }}
-        run: |
-          echo "${{ secrets.HARBOR_PASSWORD }}" | \
-            docker login "$REGISTRY" -u "${{ secrets.HARBOR_USERNAME }}" -p "${{ secrets.HARBOR_PASSWORD }}"
+      # Đăng nhập bằng action official (nhớ secrets đúng)
+      - name: Login to Harbor (robot of 'library')
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY_HOST }}:${{ secrets.KONG_PORT }}
+          username: ${{ secrets.HARBOR_USERNAME }}   # ví dụ: robot$library+ci
+          password: ${{ secrets.HARBOR_PASSWORD }}
 
-      - name: Build & Push image
-        env:
-          REGISTRY: ${{ env.REGISTRY_HOST }}:${{ secrets.KONG_PORT }}
-          IMAGE: ${{ env.REGISTRY_HOST }}:${{ secrets.KONG_PORT }}/${{ env.PROJECT }}/${{ env.IMAGE_NAME }}
-          TAG: ${{ env.TAG }}
+      # In ra config để chắc chắn đã có auth (ẩn password)
+      - name: Show Docker auth config (masked)
         run: |
-          set -e
-          echo "Building $IMAGE:$TAG"
-          docker build -t "$IMAGE:$TAG" .
-          docker push "$IMAGE:$TAG"
+          cat ~/.docker/config.json | sed 's/"auth": *"[^"]*"/"auth":"***"/g' || true
 
-      # (tuỳ chọn) thêm tag latest khi push vào nhánh main
-      - name: Tag latest
-        if: github.ref == 'refs/heads/main'
-        env:
-          IMAGE: ${{ env.REGISTRY_HOST }}:${{ secrets.KONG_PORT }}/${{ env.PROJECT }}/${{ env.IMAGE_NAME }}
-          TAG: ${{ env.TAG }}
-        run: |
-          set -e
-          docker tag "$IMAGE:$TAG" "$IMAGE:latest"
-          docker push "$IMAGE:latest"
+      # Build & Push
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.REGISTRY_HOST }}:${{ secrets.KONG_PORT }}/${{ env.PROJECT }}/${{ env.IMAGE_NAME }}:${{ env.TAG }}
+            ${{ env.REGISTRY_HOST }}:${{ secrets.KONG_PORT }}/${{ env.PROJECT }}/${{ env.IMAGE_NAME }}:latest
