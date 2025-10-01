@@ -1,4 +1,4 @@
-name: CI (Self-hosted) — Build & Push to Harbor (CLI)
+name: CI — Hardcoded Harbor Test
 
 on:
   push:
@@ -9,7 +9,7 @@ env:
   PROJECT: library
   IMAGE_NAME: test-server
   TAG: ${{ github.sha }}
-  REGISTRY: harbor.internal:52394   # host:port, dùng 1 biến duy nhất
+  REGISTRY: harbor.internal:52394   # đổi port này thành đúng NodePort Kong expose
 
 jobs:
   build-and-push:
@@ -18,44 +18,35 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Debug kết nối & xác thực /v2/
-      - name: Debug Harbor reachability
+      # Debug endpoint Harbor
+      - name: Debug Harbor connectivity
         run: |
-          echo "REGISTRY=${{ env.REGISTRY }}"
+          echo "Check harbor.internal DNS & curl"
           getent hosts harbor.internal || true
-          echo "== curl /v2/ =="
-          curl -sv -H "Host: harbor.internal" http://${{ env.REGISTRY }}/v2/ | head -n 20 || true
+          curl -v -H "Host: harbor.internal" http://${{ env.REGISTRY }}/v2/ || true
 
-      # Xoá mọi đăng nhập cũ dễ gây nhầm host/port
-      - name: Cleanup old docker auth
+      # Docker login với hardcode user/pass
+      - name: Docker login Harbor (hardcoded robot account)
         run: |
-          docker logout harbor.internal || true
-          docker logout harbor.internal:80 || true
-          docker logout ${{ env.REGISTRY }} || true
-          rm -f ~/.docker/config.json || true
+          echo -n 'wJoKqc7XdEs9dz0jdHb9BaRyoiqgwBob' | \
+            docker login ${{ env.REGISTRY }} \
+              -u 'robot$library+ci' --password-stdin
 
-      # Đăng nhập đúng host:port
-      - name: Docker login Harbor (robot)
-        run: |
-          echo "${{ secrets.HARBOR_PASSWORD }}" | \
-            docker login "${{ env.REGISTRY }}" \
-            -u "${{ secrets.HARBOR_USERNAME }}" -p "${{ secrets.HARBOR_PASSWORD }}"
-
-      # Build bằng Docker CLI
+      # Build image
       - name: Build image
         run: |
           IMAGE="${{ env.REGISTRY }}/${{ env.PROJECT }}/${{ env.IMAGE_NAME }}:${{ env.TAG }}"
           echo "Building $IMAGE"
           docker build -t "$IMAGE" .
 
-      # Push bằng Docker CLI (bắt buộc tag gồm host:port)
+      # Push image
       - name: Push image
         run: |
           IMAGE="${{ env.REGISTRY }}/${{ env.PROJECT }}/${{ env.IMAGE_NAME }}:${{ env.TAG }}"
           docker push "$IMAGE"
 
-      # (tuỳ chọn) tag latest
-      - name: Tag latest
+      # (Optional) Tag latest
+      - name: Tag & push latest
         if: github.ref == 'refs/heads/main'
         run: |
           BASE="${{ env.REGISTRY }}/${{ env.PROJECT }}/${{ env.IMAGE_NAME }}"
