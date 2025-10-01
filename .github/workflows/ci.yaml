@@ -9,7 +9,7 @@ env:
   PROJECT: library
   IMAGE_NAME: test-server
   TAG: ${{ github.sha }}
-  REGISTRY: harbor.internal:${{ secrets.KONG_PORT }}   # host:port, dùng 1 biến duy nhất
+  REGISTRY: harbor.internal:52394   # host:port, dùng 1 biến duy nhất
 
 jobs:
   build-and-push:
