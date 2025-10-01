@@ -39,7 +39,7 @@ jobs:
         run: |
           echo "${{ secrets.HARBOR_PASSWORD }}" | \
             docker login "${{ env.REGISTRY }}" \
-            -u "${{ secrets.HARBOR_USERNAME }}" --password-stdin
+            -u "${{ secrets.HARBOR_USERNAME }}" -p "${{ secrets.HARBOR_PASSWORD }}"
 
       # Build bằng Docker CLI
       - name: Build image
