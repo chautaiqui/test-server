@@ -32,7 +32,7 @@ jobs:
           REGISTRY: ${{ env.REGISTRY_HOST }}:${{ secrets.KONG_PORT }}
         run: |
           echo "${{ secrets.HARBOR_PASSWORD }}" | \
-            docker login "$REGISTRY" -u "${{ secrets.HARBOR_USERNAME }}" --password-stdin
+            docker login "$REGISTRY" -u "${{ secrets.HARBOR_USERNAME }}" -p "${{ secrets.HARBOR_PASSWORD }}"
 
       - name: Build & Push image
         env:
