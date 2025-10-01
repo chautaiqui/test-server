@@ -1,4 +1,4 @@
-name: CI (Self-hosted) — Build & Push to Harbor
+name: CI (Self-hosted) — Build & Push to Harbor (CLI)
 
 on:
   push:
@@ -9,7 +9,7 @@ env:
   PROJECT: library
   IMAGE_NAME: test-server
   TAG: ${{ github.sha }}
-  REGISTRY: harbor.internal:${{ secrets.KONG_PORT }}   # GỘP host+port vào 1 biến
+  REGISTRY: harbor.internal:${{ secrets.KONG_PORT }}   # host:port, dùng 1 biến duy nhất
 
 jobs:
   build-and-push:
@@ -18,39 +18,46 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Debug kết nối
-      - name: Debug connectivity
+      # Debug kết nối & xác thực /v2/
+      - name: Debug Harbor reachability
         run: |
           echo "REGISTRY=${{ env.REGISTRY }}"
-          echo "== /etc/hosts =="
-          grep -E 'harbor\.internal' /etc/hosts || true
-          echo "== /v2/ =="
+          getent hosts harbor.internal || true
+          echo "== curl /v2/ =="
           curl -sv -H "Host: harbor.internal" http://${{ env.REGISTRY }}/v2/ | head -n 20 || true
 
-      # Xoá auth cũ có thể gây nhầm host/port
+      # Xoá mọi đăng nhập cũ dễ gây nhầm host/port
       - name: Cleanup old docker auth
         run: |
+          docker logout harbor.internal || true
+          docker logout harbor.internal:80 || true
           docker logout ${{ env.REGISTRY }} || true
-          docker logout ${{ env.REGISTRY }} || true
+          rm -f ~/.docker/config.json || true
 
-      # Login đúng host:port
-      - name: Login to Harbor
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ env.REGISTRY }}           # << dùng host:port
-          username: ${{ secrets.HARBOR_USERNAME }} # ví dụ: robot$library+ci
-          password: ${{ secrets.HARBOR_PASSWORD }}
-
-      - name: Show Docker auth (masked)
+      # Đăng nhập đúng host:port
+      - name: Docker login Harbor (robot)
         run: |
-          cat ~/.docker/config.json | sed 's/"auth": *"[^"]*"/"auth":"***"/g' || true
+          echo "${{ secrets.HARBOR_PASSWORD }}" | \
+            docker login "${{ env.REGISTRY }}" \
+            -u "${{ secrets.HARBOR_USERNAME }}" --password-stdin
 
-      # Build & push, TAGS phải gồm host:port
-      - name: Build and push image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          push: true
-          tags: |
-            ${{ env.REGISTRY }}/${{ env.PROJECT }}/${{ env.IMAGE_NAME }}:${{ env.TAG }}
-            ${{ env.REGISTRY }}/${{ env.PROJECT }}/${{ env.IMAGE_NAME }}:latest
+      # Build bằng Docker CLI
+      - name: Build image
+        run: |
+          IMAGE="${{ env.REGISTRY }}/${{ env.PROJECT }}/${{ env.IMAGE_NAME }}:${{ env.TAG }}"
+          echo "Building $IMAGE"
+          docker build -t "$IMAGE" .
+
+      # Push bằng Docker CLI (bắt buộc tag gồm host:port)
+      - name: Push image
+        run: |
+          IMAGE="${{ env.REGISTRY }}/${{ env.PROJECT }}/${{ env.IMAGE_NAME }}:${{ env.TAG }}"
+          docker push "$IMAGE"
+
+      # (tuỳ chọn) tag latest
+      - name: Tag latest
+        if: github.ref == 'refs/heads/main'
+        run: |
+          BASE="${{ env.REGISTRY }}/${{ env.PROJECT }}/${{ env.IMAGE_NAME }}"
+          docker tag "$BASE:${{ env.TAG }}" "$BASE:latest"
+          docker push "$BASE:latest"
