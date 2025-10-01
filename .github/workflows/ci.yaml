@@ -1,0 +1,57 @@
+name: CI (Self-hosted) — Build & Push to Harbor
+
+on:
+  push:
+    branches: [ main ]   # đổi theo nhánh của bạn
+  workflow_dispatch: {}
+
+env:
+  REGISTRY_HOST: harbor.internal            # Harbor qua Kong (host nội bộ)
+  PROJECT: test-server                             # Harbor project
+  IMAGE_NAME: test-server                      # Tên image trong project
+  TAG: ${{ github.sha }}                    # Tag theo commit SHA
+
+jobs:
+  build-and-push:
+    # Chạy trên self-hosted runner (máy local / pod trong k8s)
+    runs-on: self-hosted
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # (Tùy chọn) Hiển thị info runner để debug nhanh
+      - name: Runner info
+        run: |
+          uname -a || true
+          docker version || true
+          docker info || true
+
+      - name: Docker login Harbor (via Kong)
+        env:
+          REGISTRY: ${{ env.REGISTRY_HOST }}:${{ secrets.KONG_PORT }}
+        run: |
+          echo "${{ secrets.HARBOR_PASSWORD }}" | \
+            docker login "$REGISTRY" -u "${{ secrets.HARBOR_USERNAME }}" --password-stdin
+
+      - name: Build & Push image
+        env:
+          REGISTRY: ${{ env.REGISTRY_HOST }}:${{ secrets.KONG_PORT }}
+          IMAGE: ${{ env.REGISTRY_HOST }}:${{ secrets.KONG_PORT }}/${{ env.PROJECT }}/${{ env.IMAGE_NAME }}
+          TAG: ${{ env.TAG }}
+        run: |
+          set -e
+          echo "Building $IMAGE:$TAG"
+          docker build -t "$IMAGE:$TAG" .
+          docker push "$IMAGE:$TAG"
+
+      # (tuỳ chọn) thêm tag latest khi push vào nhánh main
+      - name: Tag latest
+        if: github.ref == 'refs/heads/main'
+        env:
+          IMAGE: ${{ env.REGISTRY_HOST }}:${{ secrets.KONG_PORT }}/${{ env.PROJECT }}/${{ env.IMAGE_NAME }}
+          TAG: ${{ env.TAG }}
+        run: |
+          set -e
+          docker tag "$IMAGE:$TAG" "$IMAGE:latest"
+          docker push "$IMAGE:latest"
