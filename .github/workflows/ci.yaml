@@ -1,4 +1,4 @@
-name: CI — Build and Push to Harbor
+name: CI — Build and Push to Harbor (no docker login)
 
 on:
   push:
@@ -6,55 +6,101 @@ on:
   workflow_dispatch: {}
 
 env:
-  # Đã cập nhật: Đây là endpoint công khai, có thể truy cập từ internet
+  # Harbor
   REGISTRY: harbor.snapnbuy.net
   PROJECT: library
   IMAGE_NAME: test-server
   TAG: ${{ github.sha }}
 
+  # Hardcode robot account (DEMO/TEST — không an toàn cho prod)
+  HARBOR_USERNAME: "robot$library+ci"
+  HARBOR_PASSWORD: "KLmFQhd4OzrXb4ZiRTr9HssekjYcs7kc"
+
+  # Tối ưu build
+  DOCKER_BUILDKIT: "1"
+
 jobs:
   build-and-push:
-    # Chạy trên self-hosted runner của bạn
     runs-on: self-hosted
 
     steps:
       - uses: actions/checkout@v4
 
-      # --- BƯỚC DEBUG ĐÃ SỬA LẠI ---
-      # Kiểm tra kết nối đến endpoint công khai, không còn dùng harbor.internal
+      # (Tuỳ runner) Cài skopeo nếu chưa có
+      - name: Install skopeo if missing
+        run: |
+          if ! command -v skopeo >/dev/null 2>&1; then
+            echo "::group::Installing skopeo"
+            if [ -f /etc/debian_version ]; then
+              sudo apt-get update -y
+              sudo apt-get install -y skopeo
+            elif [ -f /etc/redhat-release ]; then
+              sudo yum install -y skopeo
+            else
+              echo "Please install skopeo on this runner (unsupported distro auto-install)."
+              exit 1
+            fi
+            echo "::endgroup::"
+          fi
+          skopeo --version
+
+      # Kiểm tra kết nối Harbor public
       - name: Debug Harbor connectivity
         run: |
-          echo "--- Checking DNS for ${{ env.REGISTRY }} ---"
-          dig ${{ env.REGISTRY }} || nslookup ${{ env.REGISTRY }}
+          echo "--- DNS ---"
+          (dig $REGISTRY || nslookup $REGISTRY) || true
+          echo "--- /v2/ challenge ---"
+          curl -sS -I https://$REGISTRY/v2/ || true
 
-          echo "--- Checking connection to ${{ env.REGISTRY }} via HTTPS ---"
-          # Kết nối qua HTTPS (port 443) vì đã có SSL
-          curl -v https://${{ env.REGISTRY }}/v2/
-
-      # --- BƯỚC LOGIN ĐÃ CẢI TIẾN BẢO MẬT ---
-      # Sử dụng GitHub Secrets thay vì hardcode user/pass
-      - name: Docker login to Harbor
-        run: |
-          echo "${{ secrets.HARBOR_PASSWORD }}" | docker login ${{ env.REGISTRY }} \
-            -u "${{ secrets.HARBOR_USERNAME }}" --password-stdin
-
-      # Build image
+      # Build image với tag SHA
       - name: Build image
         run: |
-          IMAGE="${{ env.REGISTRY }}/${{ env.PROJECT }}/${{ env.IMAGE_NAME }}:${{ env.TAG }}"
+          IMAGE="$REGISTRY/$PROJECT/$IMAGE_NAME:$TAG"
           echo "Building $IMAGE"
           docker build -t "$IMAGE" .
 
-      # Push image
-      - name: Push image
+      # Tạo authfile tạm cho skopeo (không dùng docker login)
+      - name: Create skopeo authfile
         run: |
-          IMAGE="${{ env.REGISTRY }}/${{ env.PROJECT }}/${{ env.IMAGE_NAME }}:${{ env.TAG }}"
-          docker push "$IMAGE"
+          AUTH="$(printf '%s:%s' "$HARBOR_USERNAME" "$HARBOR_PASSWORD" | base64 | tr -d '\n')"
+          cat > /tmp/auth.json <<EOF
+          {
+            "auths": {
+              "${REGISTRY}": {
+                "auth": "${AUTH}"
+              }
+            }
+          }
+          EOF
+          chmod 600 /tmp/auth.json
 
-      # (Tùy chọn) Tag và push "latest" nếu là nhánh main
-      - name: Tag & push latest
+      # Push tag SHA bằng skopeo (từ docker-daemon → registry)
+      - name: Push image (SHA tag) via skopeo
+        run: |
+          SRC="docker-daemon:${REGISTRY}/${PROJECT}/${IMAGE_NAME}:${TAG}"
+          DEST="docker://${REGISTRY}/${PROJECT}/${IMAGE_NAME}:${TAG}"
+          skopeo copy --dest-authfile /tmp/auth.json "$SRC" "$DEST"
+
+      # (Tuỳ chọn) Tag & push latest nếu nhánh main
+      - name: Tag & push latest via skopeo
         if: github.ref == 'refs/heads/main'
         run: |
-          BASE="${{ env.REGISTRY }}/${{ env.PROJECT }}/${{ env.IMAGE_NAME }}"
-          docker tag "$BASE:${{ env.TAG }}" "$BASE:latest"
-          docker push "$BASE:latest"
+          BASE="${REGISTRY}/${PROJECT}/${IMAGE_NAME}"
+          docker tag "$BASE:${TAG}" "$BASE:latest"
+
+          SRC_LATEST="docker-daemon:${BASE}:latest"
+          DEST_LATEST="docker://${BASE}:latest"
+          skopeo copy --dest-authfile /tmp/auth.json "$SRC_LATEST" "$DEST_LATEST"
+
+      # Verify: inspect manifest trên registry
+      - name: Verify pushed image
+        run: |
+          skopeo inspect --no-tags "docker://${REGISTRY}/${PROJECT}/${IMAGE_NAME}:${TAG}" | jq '.digest'
+          if [ "${{ github.ref }}" = "refs/heads/main" ]; then
+            skopeo inspect --no-tags "docker://${REGISTRY}/${PROJECT}/${IMAGE_NAME}:latest" | jq '.digest'
+          fi
+
+      # Dọn authfile
+      - name: Cleanup authfile
+        if: always()
+        run: rm -f /tmp/auth.json || true
