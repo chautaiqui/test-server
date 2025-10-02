@@ -1,22 +1,18 @@
-name: CI — Build and Push to Harbor (no docker login)
+name: CI — Build and Push to GHCR (no docker login)
 
 on:
   push:
     branches: [ main ]
   workflow_dispatch: {}
 
+permissions:
+  contents: read
+  packages: write
+
 env:
-  # Harbor
-  REGISTRY: harbor.snapnbuy.net
-  PROJECT: library
+  REGISTRY: ghcr.io
   IMAGE_NAME: test-server
   TAG: ${{ github.sha }}
-
-  # Hardcode robot account (DEMO/TEST — không an toàn cho prod)
-  HARBOR_USERNAME: "robot$library+ci"
-  HARBOR_PASSWORD: "KLmFQhd4OzrXb4ZiRTr9HssekjYcs7kc"
-
-  # Tối ưu build
   DOCKER_BUILDKIT: "1"
 
 jobs:
@@ -26,78 +22,105 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # (Tuỳ runner) Cài skopeo nếu chưa có
-      - name: Install skopeo if missing
+      # Tính sẵn owner lowercase và image refs
+      - name: Compute image refs
         run: |
-          if ! command -v skopeo >/dev/null 2>&1; then
-            echo "::group::Installing skopeo"
-            if [ -f /etc/debian_version ]; then
-              sudo apt-get update -y
-              sudo apt-get install -y skopeo
-            elif [ -f /etc/redhat-release ]; then
-              sudo yum install -y skopeo
-            else
-              echo "Please install skopeo on this runner (unsupported distro auto-install)."
-              exit 1
-            fi
-            echo "::endgroup::"
+          OWNER_LC=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          echo "OWNER_LC=$OWNER_LC" >> "$GITHUB_ENV"
+          echo "BASE=$REGISTRY/$OWNER_LC/$IMAGE_NAME" >> "$GITHUB_ENV"
+          echo "IMAGE=$REGISTRY/$OWNER_LC/$IMAGE_NAME:$TAG" >> "$GITHUB_ENV"
+          echo "IMAGE_LATEST=$REGISTRY/$OWNER_LC/$IMAGE_NAME:latest" >> "$GITHUB_ENV"
+
+      # Cài skopeo/jq nếu thiếu (macOS/Linux)
+      - name: Install skopeo & jq if missing
+        run: |
+          need_cmd() { command -v "$1" >/dev/null 2>&1 || MISSING="$MISSING $1"; }
+          MISSING=""
+          need_cmd skopeo; need_cmd jq
+          if [ -z "$MISSING" ]; then
+            skopeo --version; jq --version; exit 0
           fi
-          skopeo --version
+          echo "::group::Installing$MISSING"
+          case "${RUNNER_OS}" in
+            macOS)
+              if ! command -v brew >/dev/null 2>&1; then
+                echo "Homebrew not found. Install https://brew.sh"; exit 1
+              fi
+              brew update
+              [[ "$MISSING" == *"skopeo"* ]] && brew install skopeo || true
+              [[ "$MISSING" == *"jq"* ]] && brew install jq || true
+              ;;
+            Linux)
+              if [ -f /etc/debian_version ]; then
+                sudo apt-get update -y
+                [[ "$MISSING" == *"skopeo"* ]] && sudo apt-get install -y skopeo || true
+                [[ "$MISSING" == *"jq"* ]] && sudo apt-get install -y jq || true
+              elif [ -f /etc/redhat-release ]; then
+                if command -v dnf >/dev/null 2>&1; then
+                  [[ "$MISSING" == *"skopeo"* ]] && sudo dnf install -y skopeo || true
+                  [[ "$MISSING" == *"jq"* ]] && sudo dnf install -y jq || true
+                else
+                  [[ "$MISSING" == *"skopeo"* ]] && sudo yum install -y skopeo || true
+                  [[ "$MISSING" == *"jq"* ]] && sudo yum install -y jq || true
+                fi
+              else
+                echo "Unsupported Linux distro for auto-install. Please preinstall skopeo & jq."
+                exit 1
+              fi
+              ;;
+            *) echo "Unsupported OS ${RUNNER_OS}"; exit 1 ;;
+          esac
+          echo "::endgroup::"
+          skopeo --version; jq --version
 
-      # Kiểm tra kết nối Harbor public
-      - name: Debug Harbor connectivity
+      # Check GHCR v2 challenge (401 Bearer là bình thường)
+      - name: Debug GHCR connectivity
         run: |
-          echo "--- DNS ---"
-          (dig $REGISTRY || nslookup $REGISTRY) || true
-          echo "--- /v2/ challenge ---"
-          curl -sS -I https://$REGISTRY/v2/ || true
+          echo "--- /v2/ challenge (expect 401 with Bearer) ---"
+          curl -sS -I https://ghcr.io/v2/ || true
 
-      # Build image với tag SHA
+      # Build image (tag theo GHCR path)
       - name: Build image
         run: |
-          IMAGE="$REGISTRY/$PROJECT/$IMAGE_NAME:$TAG"
           echo "Building $IMAGE"
           docker build -t "$IMAGE" .
 
-      # Tạo authfile tạm cho skopeo (không dùng docker login)
-      - name: Create skopeo authfile
+      # Tạo authfile tạm cho skopeo dùng GH_TOKEN
+      - name: Create skopeo authfile (GHCR)
+        env:
+          GH_USER: ${{ github.actor }}
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
         run: |
-          AUTH="$(printf '%s:%s' "$HARBOR_USERNAME" "$HARBOR_PASSWORD" | base64 | tr -d '\n')"
+          AUTH="$(printf '%s:%s' "$GH_USER" "$GH_TOKEN" | base64 | tr -d '\n')"
           cat > /tmp/auth.json <<EOF
-          {
-            "auths": {
-              "${REGISTRY}": {
-                "auth": "${AUTH}"
-              }
-            }
-          }
+          { "auths": { "ghcr.io": { "auth": "${AUTH}" } } }
           EOF
           chmod 600 /tmp/auth.json
 
-      # Push tag SHA bằng skopeo (từ docker-daemon → registry)
-      - name: Push image (SHA tag) via skopeo
+      # Push tag SHA via skopeo
+      - name: Push image (SHA) to GHCR
         run: |
-          SRC="docker-daemon:${REGISTRY}/${PROJECT}/${IMAGE_NAME}:${TAG}"
-          DEST="docker://${REGISTRY}/${PROJECT}/${IMAGE_NAME}:${TAG}"
+          SRC="docker-daemon:${IMAGE}"
+          DEST="docker://${IMAGE}"
           skopeo copy --dest-authfile /tmp/auth.json "$SRC" "$DEST"
 
-      # (Tuỳ chọn) Tag & push latest nếu nhánh main
-      - name: Tag & push latest via skopeo
+      # Tag & push latest (nhánh main)
+      - name: Tag & push latest
         if: github.ref == 'refs/heads/main'
         run: |
-          BASE="${REGISTRY}/${PROJECT}/${IMAGE_NAME}"
-          docker tag "$BASE:${TAG}" "$BASE:latest"
+          docker tag "$IMAGE" "$IMAGE_LATEST"
+          skopeo copy --dest-authfile /tmp/auth.json \
+            "docker-daemon:${IMAGE_LATEST}" "docker://${IMAGE_LATEST}"
 
-          SRC_LATEST="docker-daemon:${BASE}:latest"
-          DEST_LATEST="docker://${BASE}:latest"
-          skopeo copy --dest-authfile /tmp/auth.json "$SRC_LATEST" "$DEST_LATEST"
-
-      # Verify: inspect manifest trên registry
+      # Verify digests (có auth)
       - name: Verify pushed image
+        env:
+          GH_USER: ${{ github.actor }}
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
         run: |
-          skopeo inspect --no-tags "docker://${REGISTRY}/${PROJECT}/${IMAGE_NAME}:${TAG}" | jq '.digest'
+          skopeo inspect --no-tags --creds "${GH_USER}:${GH_TOKEN}" "docker://${IMAGE}" | jq -r '.Digest'
           if [ "${{ github.ref }}" = "refs/heads/main" ]; then
-            skopeo inspect --no-tags "docker://${REGISTRY}/${PROJECT}/${IMAGE_NAME}:latest" | jq '.digest'
+            skopeo inspect --no-tags --creds "${GH_USER}:${GH_TOKEN}" "docker://${IMAGE_LATEST}" | jq -r '.Digest'
           fi
 
       # Dọn authfile
