@@ -1,4 +1,4 @@
-name: CI — Hardcoded Harbor Test
+name: CI — Build and Push to Harbor
 
 on:
   push:
@@ -6,31 +6,37 @@ on:
   workflow_dispatch: {}
 
 env:
+  # Đã cập nhật: Đây là endpoint công khai, có thể truy cập từ internet
+  REGISTRY: harbor.snapnbuy.net
   PROJECT: library
   IMAGE_NAME: test-server
   TAG: ${{ github.sha }}
-  REGISTRY: harbor.internal:30000   # đổi port này thành đúng NodePort Kong expose
 
 jobs:
   build-and-push:
+    # Chạy trên self-hosted runner của bạn
     runs-on: self-hosted
 
     steps:
       - uses: actions/checkout@v4
 
-      # Debug endpoint Harbor
+      # --- BƯỚC DEBUG ĐÃ SỬA LẠI ---
+      # Kiểm tra kết nối đến endpoint công khai, không còn dùng harbor.internal
       - name: Debug Harbor connectivity
         run: |
-          echo "Check harbor.internal DNS & curl"
-          getent hosts harbor.internal || true
-          curl -v -H "Host: harbor.internal" http://${{ env.REGISTRY }}/v2/ || true
+          echo "--- Checking DNS for ${{ env.REGISTRY }} ---"
+          dig ${{ env.REGISTRY }} || nslookup ${{ env.REGISTRY }}
 
-      # Docker login với hardcode user/pass
-      - name: Docker login Harbor (hardcoded robot account)
+          echo "--- Checking connection to ${{ env.REGISTRY }} via HTTPS ---"
+          # Kết nối qua HTTPS (port 443) vì đã có SSL
+          curl -v https://${{ env.REGISTRY }}/v2/
+
+      # --- BƯỚC LOGIN ĐÃ CẢI TIẾN BẢO MẬT ---
+      # Sử dụng GitHub Secrets thay vì hardcode user/pass
+      - name: Docker login to Harbor
         run: |
-          echo -n 'ASC6MNZgYCDMVFI6l4JwYB68xT6gJMcx' | \
-            docker login ${{ env.REGISTRY }} \
-              -u 'robot$library+ci' --password-stdin
+          echo "${{ secrets.HARBOR_PASSWORD }}" | docker login ${{ env.REGISTRY }} \
+            -u "${{ secrets.HARBOR_USERNAME }}" --password-stdin
 
       # Build image
       - name: Build image
@@ -45,7 +51,7 @@ jobs:
           IMAGE="${{ env.REGISTRY }}/${{ env.PROJECT }}/${{ env.IMAGE_NAME }}:${{ env.TAG }}"
           docker push "$IMAGE"
 
-      # (Optional) Tag latest
+      # (Tùy chọn) Tag và push "latest" nếu là nhánh main
       - name: Tag & push latest
         if: github.ref == 'refs/heads/main'
         run: |
