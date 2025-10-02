@@ -28,7 +28,7 @@ jobs:
       # Docker login với hardcode user/pass
       - name: Docker login Harbor (hardcoded robot account)
         run: |
-          echo -n 'wJoKqc7XdEs9dz0jdHb9BaRyoiqgwBob' | \
+          echo -n 'ASC6MNZgYCDMVFI6l4JwYB68xT6gJMcx' | \
             docker login ${{ env.REGISTRY }} \
               -u 'robot$library+ci' --password-stdin
 
